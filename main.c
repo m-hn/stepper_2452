@@ -30,21 +30,26 @@ unsigned const char interleave_seq[] = {BIT1, BIT1|BIT2, BIT2, BIT2|BIT3, BIT3, 
 #define	MAX_RPM				(600)
 #define STEP_INTERVAL		(2)	// 2 ms. 600*48 steps/ min; 480 steps/ sec for an interval between steps of ~2ms
 
-#define MAX_X				(unsigned long)(215900)		// Standard letter size, in micro meters
-#define MAX_Y				(unsigned long)(279400)
-#define MAX_LEN				(unsigned long)(353096)		// Length of diagonal, pre-calculated
-#define REEL_DIA			(unsigned long)(1000)		// Diameter of the spool that each motor controls
-#define LEN_REELED_PER_REV	(unsigned long)(31415)		// pi * d
-#define LEN_REELED_PER_STEP	(unsigned long)(654)		// (pi * d)/48
+/*
+ * Assuming letter sheet sized canvas of 21.59cm x 27.94cm
+ * Assuming a spool diameter of 10mm
+ * For each step, the plot point will move pi * d/ 48 = 6.45mm
+ * # steps required to cover the 21.59cm in the X direction = 21.59/.654 = 330
+ * # steps required to cover the 27.94cm in the Y direction = 27.94/.654 = 427
+ * #steps in the diagonal = sqrt(x^2+y^2)/ 654 = 540
+ */
+#define MAX_X_STEPS			(330)
+#define MAX_Y_STEPS			(427)
+#define MAX_STEPS			(540)
 
-#define MAX_TIMER_INDX		(7)
+#define MAX_TIMERS			(25)	// May be as many events pending as # of steps
 #define TIMER_ONE_SHOT		(1)
+#define TIMER_COUNTER_MAX	(32768)
 
 /*
 #define MAX_MEM_POOLS		4
 #define MEM_POOL_SIZE		16		// bytes
 */
-
 
 typedef enum{
 	PORT_P1 = 1,
@@ -52,8 +57,8 @@ typedef enum{
 }OP_PORT;
 
 typedef enum{
-	REEL_IN 	=  1,
-	REEL_OUT 	= -1
+	REEL_IN = -1,
+	REEL_OUT = 1
 } REEL_DIR;
 
 typedef struct{
@@ -61,7 +66,7 @@ typedef struct{
 	unsigned char	*mode;		// one phase, two phase or interleaved
 	OP_PORT			port;		// Output port that the motor is wired to
 	REEL_DIR		d;			// Current reel in/ out direction
-	unsigned long 	len;		// The length reeled in or out so far
+	unsigned int	curr_step_pos;		// Current X/Y position, in # of steps from origin
 } MOTOR_DESC;
 
 /*
@@ -81,9 +86,6 @@ typedef	void (*TIMER_CBK)(void *);
 typedef struct{
 	TIMER_CBK		p_fn;			// Function the timer will call back
 	void 			*args;			// Arguments to pass back. Remembered context for calling function. Calling fn manages memory
-	unsigned int	duration;		// requested duration, in multiples of 1ms
-	int				curr_dur;		// For use by timer- Count down to 0 from requested duration
-	int				type;			// TIMER_ONE_SHOT or # times the timer must fire
 }TIMER_CONTEXT;
 
 
@@ -92,25 +94,19 @@ inline void test_timer( void *arg);
 
 int register_timer(
 		TIMER_CBK 			p_cbk,	// time call back fn
-		void 				*p_args,// Args to be passed back to the call back fn
-		int 				dur,	// duration in multiples of 1ms
-		int					type);	// # times to fire
+		void 				*p_args);// Args to be passed back to the call back fn
 
-inline void one_step(
-		void 				*motor_desc);	// Callback fn from timer to step motor 1
+void one_step(
+		void				*motor_desc);	// Callback fn from timer to step motor 1
 
 void stop_motor(
 		MOTOR_DESC			*m);
 
-void reel_in_out(
-		MOTOR_DESC 			*m,		// Which motor to act on
-		unsigned long 		len); 	// Length to reel in/ out
-
-void goto_xy(
+void lineto_xy(
 		MOTOR_DESC 			*m1,	// X motor
 		MOTOR_DESC 			*m2, 	// Y motor
-		unsigned long 		x, 		// Where to go- x & Y coordinates
-		unsigned long 		y);
+		unsigned int 		x, 		// Where to go- Absolute x & Y coordinates in #steps
+		unsigned int		y);
 
 /*unsigned char *malloc();
 
@@ -120,16 +116,12 @@ int free(unsigned char *m);
 // Global variables
 MOTOR_DESC	m1, m2;
 // MEM_POOL 	g_mem_pool[4];
+//debug
+int g_d_onestep, g_d_p1, g_d_p2, g_timer_full_err;
 
-TIMER_CONTEXT timer_context[MAX_TIMER_INDX+1] = {
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT},
-		{NULL, NULL, 0, 0, TIMER_ONE_SHOT}};	// Service max 8 requests for now- one for each motor
+TIMER_CONTEXT timer_context[MAX_TIMERS];
+int g_timer_head, g_timer_tail;				// Head and tail of timer Q
+int	g_num_timers;
 
 void main(void)
 {
@@ -142,47 +134,58 @@ void main(void)
 	m1.curr_seq = 0;
 	m1.mode = (unsigned char *)one_phase_seq;
 	m1.port = PORT_P1;
-	m1.len = 0;
-	m1.d = REEL_IN;
+	m1.curr_step_pos = 0;
+	m1.d = REEL_OUT;
 
 	m2.curr_seq = 0;
 	m2.mode = (unsigned char *)one_phase_seq;
 	m2.port = PORT_P2;
-	m2.len = 0;
-	m2.d = REEL_IN;
+	m2.curr_step_pos = 0;
+	m2.d = REEL_OUT;
+
+	// Initialize timer variables
+	g_timer_head = g_num_timers = g_timer_tail = 0;
+
+	// debug
+	g_d_onestep =g_d_p1 = g_d_p2 = 0;
+	g_timer_full_err = 0;
 
 	// register_timer(test_timer, NULL, 1, 5);
-	goto_xy( &m1, &m2, 0, MAX_Y);
-	goto_xy( &m1, &m2, MAX_X, MAX_Y);
-	goto_xy( &m1, &m2, MAX_X, 0);
-	goto_xy( &m1, &m2, 0, 0);
 
 	// Setup Timer A - Last step
 	TACCTL0 = CCIE;        			// CCR0 interrupt enabled
-	TACCR0 = 32768;
+	TACCR0 = TIMER_COUNTER_MAX;
 	TACTL = TASSEL_2 + MC_1;        // SMCLK, contmode
-	_BIS_SR(LPM0_bits + GIE);       // Enter LPM0 w/ interrupt
+	//_BIS_SR(LPM0_bits + GIE);       // Enter LPM0 w/ interrupt
+	_BIS_SR(GIE);
 
+	lineto_xy( &m1, &m2, 0, 400);
+
+	// dummy
+	m1.curr_seq++;
+
+	while(1);
 }
 
-inline void one_step(void *p_v)
+void one_step(void *p_v)
 {
-	MOTOR_DESC	*p_m = p_v;
+	MOTOR_DESC	*p_m;
 
-	if(p_m->len <= MAX_LEN)		// Not already reeled out fully
+	p_m = (MOTOR_DESC *)p_v;
+	g_d_onestep ++;
+
+	if(p_m->curr_step_pos < MAX_STEPS)		// Not already reeled out fully
 	{
 		switch(p_m->port) {
-			case PORT_P1: P1OUT = BIT0 + p_m->mode[p_m->curr_seq]; break;
-			case PORT_P2: P2OUT = BIT0 + p_m->mode[p_m->curr_seq]; break;
+			case PORT_P1: P1OUT = BIT0 + p_m->mode[p_m->curr_seq]; g_d_p1++; break;
+			case PORT_P2: P2OUT = BIT0 + p_m->mode[p_m->curr_seq]; g_d_p2++; break;
 			default: break;
 		}
 		p_m->curr_seq += p_m->d;	// Evaluates to ++ or --
+
 		if( p_m->curr_seq < 0 ) p_m->curr_seq = MAX_SEQ_INDX;
 		else if( p_m->curr_seq > MAX_SEQ_INDX ) p_m->curr_seq = 0;
-		p_m->len += p_m->d * LEN_REELED_PER_STEP;
 	}
-	if(p_m->len > MAX_LEN) // Since this is unsigned, it will wrap around -ve values
-		p_m->len= MAX_LEN;
 }
 
 void stop_motor(MOTOR_DESC *m)
@@ -194,31 +197,71 @@ void stop_motor(MOTOR_DESC *m)
 	}
 }
 
-void goto_xy(MOTOR_DESC *m1, MOTOR_DESC *m2, unsigned long x, unsigned long y)
+void lineto_xy(MOTOR_DESC *m1, MOTOR_DESC *m2, unsigned int x2, unsigned int y2)
 {
-	if(m1->len > x)
-	{
-		m1->d = REEL_IN;
-		reel_in_out(m1, (m1->len)-x);
-	}
-	else if(m1->len < x)
-	{
-		m1->d = REEL_OUT;
-		reel_in_out(m1, x-(m1->len));
-	}
+	int xinc, yinc, xerr2, yerr2, dx, dy, dx2, dy2;
+	unsigned int *x, *y;
 
-	if(m2->len > y)
+	x = &(m1->curr_step_pos);
+	y = &(m2->curr_step_pos);
+
+	xinc = yinc = 1;;
+
+	dx = x2 - *x;
+	m1->d = m2-> d = REEL_OUT;
+	if( dx < 0 )
 	{
-		m2->d = REEL_IN;
-		reel_in_out(m2, (m2->len)-y);
+		xinc = -1;
+		m1->d = REEL_IN;
+		dx = -dx;
 	}
-	else if(m2->len < y)
+	dx2 = dx * 2;
+
+	dy = y2 - *y;
+	if( dy < 0 )
 	{
-		m2->d = REEL_OUT;
-		reel_in_out(m2, y-(m2->len));
+		yinc = -1;
+		m2->d = REEL_IN;
+		dy = -dy;
+	}
+	dy2 = dy * 2;
+
+	if( (0 != dx) | (0 != dy) )
+	{
+		if( dy <= dx )		// Slope <= 1
+		{
+			xerr2 = 0;
+			do{
+				*x += xinc;
+				xerr2 += dy2;
+				register_timer(one_step, m1);
+				if( xerr2 > dx )
+				{
+					*y += yinc;
+					register_timer(one_step, m2);
+					xerr2 -= dx2;
+				}
+			} while(*x <= x2);
+		}
+		else
+		{
+			yerr2 = 0;
+			do {
+				*y += yinc;
+				register_timer(one_step, m2);
+				yerr2 += dx2;
+				if( yerr2 > dy )
+				{
+					*x += xinc;
+					register_timer(one_step, m1);
+					xerr2 -= dy2;
+				}
+			} while(*y<=y2);
+		}
 	}
 }
 
+/*
 void reel_in_out(MOTOR_DESC *m, unsigned long len)
 {
 	int			num_steps;
@@ -226,58 +269,39 @@ void reel_in_out(MOTOR_DESC *m, unsigned long len)
 
 	register_timer(one_step, m, STEP_INTERVAL, num_steps);
 }
+*/
 
 // Timer A0 interrupt service routine
 #pragma vector=TIMER0_A0_VECTOR
 __interrupt void Timer_A (void)
 {
-	int 	i;
 	TIMER_CONTEXT	*p_t;
 
-	for(i = MAX_TIMER_INDX; i >=0; i--)
+	if(g_num_timers > 0)
 	{
-		p_t = &timer_context[i];
-
-		if(NULL != p_t->p_fn)				// There is a registered timer
-		{
-			if(--(p_t->curr_dur) <= 0)		// It's time is up
-			{
-				p_t->p_fn(p_t->args);		// Invoke the call back
-				if(TIMER_ONE_SHOT == p_t->type) // Deregister the timer. Done with this timer
-				{
-					p_t->p_fn = NULL;
-					p_t->args = NULL;
-					p_t->duration = 0;
-				}
-				else
-				{
-					p_t->curr_dur = p_t->duration;
-					p_t->type--;
-				}
-			}
-		}
+		p_t = &timer_context[g_timer_head];
+		p_t->p_fn(p_t->args);		// Invoke the call back
+		g_num_timers--;
+		g_timer_head++;
+		if(g_timer_head >= MAX_TIMERS) g_timer_head = 0;
 	}
 
-	TACCR0 += 32768;
+	TACCR0 += TIMER_COUNTER_MAX;
 }
 
-int register_timer(TIMER_CBK p_cbk, void *p_args, int dur, int type)
+int register_timer(TIMER_CBK p_cbk, void *p_args)
 {
-	int 			i = 0;
-
-	for(i=MAX_TIMER_INDX; i>=0; i--)
+	if(g_num_timers < MAX_TIMERS)
 	{
-		if(NULL == timer_context[i].p_fn) // Found a free slot
-		{
-			timer_context[i].p_fn = p_cbk;
-			timer_context[i].args = p_args;
-			timer_context[i].curr_dur = timer_context[i].duration = dur;
-			timer_context[i].type = type;
-			break;
-		}
+		timer_context[g_timer_tail].p_fn = p_cbk; 		// Tail always points to the next empty slot
+		timer_context[g_timer_tail].args = p_args;
+		g_timer_tail++; g_num_timers++;
+		if(g_timer_tail >= MAX_TIMERS) g_timer_tail = 0;
 	}
+	else
+		g_timer_full_err++;
 
-	return i;
+	return g_timer_tail;
 }
 
 inline void test_timer(void *args)
