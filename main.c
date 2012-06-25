@@ -42,10 +42,12 @@ unsigned const char interleave_seq[] = {BIT1, BIT1|BIT2, BIT2, BIT2|BIT3, BIT3, 
 #define MAX_Y_STEPS			(427)
 #define MAX_STEPS			(540)
 
+#define DELAY_1MS			(0x3fff)
+/*
 #define MAX_TIMERS			(25)	// May be as many events pending as # of steps
 #define TIMER_ONE_SHOT		(1)
 #define TIMER_COUNTER_MAX	(32768)
-
+*/
 /*
 #define MAX_MEM_POOLS		4
 #define MEM_POOL_SIZE		16		// bytes
@@ -81,6 +83,7 @@ typedef struct{
 } MEM_POOL;
 */
 
+/*
 typedef	void (*TIMER_CBK)(void *);
 
 typedef struct{
@@ -95,7 +98,7 @@ inline void test_timer( void *arg);
 int register_timer(
 		TIMER_CBK 			p_cbk,	// time call back fn
 		void 				*p_args);// Args to be passed back to the call back fn
-
+*/
 void one_step(
 		void				*motor_desc);	// Callback fn from timer to step motor 1
 
@@ -108,6 +111,9 @@ void lineto_xy(
 		unsigned int 		x, 		// Where to go- Absolute x & Y coordinates in #steps
 		unsigned int		y);
 
+void my_delay(
+		int					delay);	// Delay in ms
+
 /*unsigned char *malloc();
 
 int free(unsigned char *m);
@@ -118,11 +124,11 @@ MOTOR_DESC	m1, m2;
 // MEM_POOL 	g_mem_pool[4];
 //debug
 int g_d_onestep, g_d_p1, g_d_p2, g_timer_full_err;
-
+/*
 TIMER_CONTEXT timer_context[MAX_TIMERS];
 int g_timer_head, g_timer_tail;				// Head and tail of timer Q
 int	g_num_timers;
-
+*/
 void main(void)
 {
 	WDTCTL = WDTPW + WDTHOLD;	// Stop WDT
@@ -143,26 +149,25 @@ void main(void)
 	m2.curr_step_pos = 0;
 	m2.d = REEL_OUT;
 
+	/*
 	// Initialize timer variables
 	g_timer_head = g_num_timers = g_timer_tail = 0;
-
+	*/
 	// debug
 	g_d_onestep =g_d_p1 = g_d_p2 = 0;
-	g_timer_full_err = 0;
+	//g_timer_full_err = 0;
 
 	// register_timer(test_timer, NULL, 1, 5);
 
+	/*
 	// Setup Timer A - Last step
 	TACCTL0 = CCIE;        			// CCR0 interrupt enabled
 	TACCR0 = TIMER_COUNTER_MAX;
 	TACTL = TASSEL_2 + MC_1;        // SMCLK, contmode
-	//_BIS_SR(LPM0_bits + GIE);       // Enter LPM0 w/ interrupt
-	_BIS_SR(GIE);
+	_BIS_SR(LPM0_bits + GIE);       // Enter LPM0 w/ interrupt
+	*/
 
 	lineto_xy( &m1, &m2, 0, 400);
-
-	// dummy
-	m1.curr_seq++;
 
 	while(1);
 }
@@ -186,6 +191,7 @@ void one_step(void *p_v)
 		if( p_m->curr_seq < 0 ) p_m->curr_seq = MAX_SEQ_INDX;
 		else if( p_m->curr_seq > MAX_SEQ_INDX ) p_m->curr_seq = 0;
 	}
+	my_delay(10);
 }
 
 void stop_motor(MOTOR_DESC *m)
@@ -234,11 +240,11 @@ void lineto_xy(MOTOR_DESC *m1, MOTOR_DESC *m2, unsigned int x2, unsigned int y2)
 			do{
 				*x += xinc;
 				xerr2 += dy2;
-				register_timer(one_step, m1);
+				one_step(m1);
 				if( xerr2 > dx )
 				{
 					*y += yinc;
-					register_timer(one_step, m2);
+					one_step(m2);
 					xerr2 -= dx2;
 				}
 			} while(*x <= x2);
@@ -248,12 +254,12 @@ void lineto_xy(MOTOR_DESC *m1, MOTOR_DESC *m2, unsigned int x2, unsigned int y2)
 			yerr2 = 0;
 			do {
 				*y += yinc;
-				register_timer(one_step, m2);
+				one_step(m2);
 				yerr2 += dx2;
 				if( yerr2 > dy )
 				{
 					*x += xinc;
-					register_timer(one_step, m1);
+					one_step(m1);
 					xerr2 -= dy2;
 				}
 			} while(*y<=y2);
@@ -261,6 +267,15 @@ void lineto_xy(MOTOR_DESC *m1, MOTOR_DESC *m2, unsigned int x2, unsigned int y2)
 	}
 }
 
+void my_delay(int d)
+{
+/*	int i = DELAY_1MS;
+
+	while(d--)
+		while(i--);
+*/
+	_delay_cycles(100);
+}
 /*
 void reel_in_out(MOTOR_DESC *m, unsigned long len)
 {
@@ -270,7 +285,7 @@ void reel_in_out(MOTOR_DESC *m, unsigned long len)
 	register_timer(one_step, m, STEP_INTERVAL, num_steps);
 }
 */
-
+/*
 // Timer A0 interrupt service routine
 #pragma vector=TIMER0_A0_VECTOR
 __interrupt void Timer_A (void)
@@ -310,7 +325,7 @@ inline void test_timer(void *args)
 	P2OUT ^= BIT0;
 	CCR0 += 50000;
 }
-
+*/
 /*
 unsigned char *malloc( ) // int num_bytes - fixed size for now
 {
